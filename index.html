@@ -1,16 +1,46 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Ping Debug Page</title>
+</head>
 <body>
-<script>
-setInterval(() => {
-  fetch("https://samir-hgr9.onrender.com/?ping=" + Date.now())
-    .catch(() => {});
-}, 1 * 60 * 1000); 
-</script>
+  <h2>Server is being kept alive ✅</h2>
+  <div id="logArea" style="white-space: pre-wrap; font-family: monospace;"></div>
 
-<h2>Server is being kept alive ✅</h2>
+  <script>
+    const logArea = document.getElementById('logArea');
 
+    function log(...args) {
+      const time = new Date().toISOString();
+      const message = args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' ');
+      logArea.textContent += `[${time}] ${message}\n`;
+      console.log(...args);
+    }
+
+    async function pingServer() {
+      const url = "https://samir‑hgr9.onrender.com/?ping=" + Date.now();
+      log("Attempting fetch to", url);
+      try {
+        const response = await fetch(url, {
+          method: 'GET',
+          mode: 'cors'
+        });
+        log("Fetch response status:", response.status);
+        if (!response.ok) {
+          log("Response not OK. Status:", response.status, "StatusText:", response.statusText);
+        } else {
+          const text = await response.text();
+          log("Response text:", text);
+        }
+      } catch (error) {
+        log("Fetch error:", error);
+      }
+    }
+
+    // First ping immediately, then every 1 minute
+    pingServer();
+    setInterval(pingServer, 1 * 60 * 1000);
+  </script>
 </body>
 </html>
-
-
