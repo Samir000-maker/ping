@@ -1,165 +1,53 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Ping Debug & Keep-Alive</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Ping Debug & Keep Alive</title>
   <style>
-    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial; padding: 18px; }
-    #log { white-space: pre-wrap; font-family: monospace; background:#f8f9fb; padding:12px; border:1px solid #ddd; max-height:360px; overflow:auto; }
-    .ok { color: green; } .err { color: darkred; }
+    #log { font-family: monospace; white-space: pre-wrap; max-height: 320px; overflow:auto; background:#fafafa; padding:8px; border:1px solid #ddd; }
   </style>
 </head>
 <body>
-  <h2>Ping Debug / Keep-Alive</h2>
-  <p>Server URL: <strong id="serverUrl"></strong></p>
+  <h2>Keep-alive pings (debug)</h2>
   <div id="log"></div>
 
   <script>
-    // ========== CONFIG ==========
-    // Use the exact ASCII hyphen '-' in the host name (avoid weird unicode hyphens)
-    const SERVER_BASE = 'https://samir-hgr9.onrender.com';
-    const PING_PATH = '/'; // add path if your ping route differs
-    const INTERVAL_MS = 60 * 1000;      // regular interval (1 minute)
-    const RETRY_COUNT = 3;              // retries per scheduled ping
-    const RETRY_BASE_DELAY = 1000;      // base delay for exponential backoff (ms)
-    const FETCH_TIMEOUT_MS = 8000;      // timeout per fetch attempt
-    // ==============================
+    const LOG = document.getElementById('log');
+    const HEALTH_URL = 'https://samir-hgr9.onrender.com/health';
 
-    document.getElementById('serverUrl').textContent = SERVER_BASE + PING_PATH;
-
-    const logEl = document.getElementById('log');
-    function log(...args) {
-      const t = new Date().toISOString();
-      const msg = args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
-      logEl.textContent += `[${t}] ${msg}\n`;
-      logEl.scrollTop = logEl.scrollHeight;
+    function now() { return new Date().toISOString(); }
+    function write(...args) {
+      const line = '[' + now() + '] ' + args.map(a => (typeof a === 'object' ? JSON.stringify(a) : a)).join(' ');
+      LOG.textContent += line + '\n';
+      LOG.scrollTop = LOG.scrollHeight;
       console.log(...args);
     }
 
-    // utility: timeout wrapper for fetch
-    async function fetchWithTimeout(resource, options = {}, timeout = FETCH_TIMEOUT_MS) {
-      const controller = new AbortController();
-      const id = setTimeout(() => controller.abort(), timeout);
-      options.signal = controller.signal;
+    async function pingOnce() {
+      const url = HEALTH_URL + '?t=' + Date.now();
+      write('Ping attempt ->', url);
       try {
-        return await fetch(resource, options);
-      } finally {
-        clearTimeout(id);
-      }
-    }
-
-    // Attempt multiple transports to maximize chance of being received.
-    // 1) Normal CORS fetch (preferred, allows reading response)
-    // 2) fetch(mode:'no-cors') fallback (opaque response but may reach server)
-    // 3) Image GET (browsers always try to fetch src)
-    async function tryPingOnce(url) {
-      // 1) normal fetch - cors
-      try {
-        log('try: fetch (cors) ->', url);
-        const res = await fetchWithTimeout(url, { method: 'GET', mode: 'cors' });
-        log('fetch (cors) status:', res.status, 'ok=', res.ok);
-        try {
-          const txt = await res.text();
-          log('response text:', txt.slice(0, 100));
-        } catch(e){ /* ignore reading errors */ }
-        return { ok: true, method: 'fetch-cors', status: res.status };
-      } catch (err) {
-        log('fetch (cors) failed:', err);
-      }
-
-      // 2) fetch with no-cors -> opaque response but likely reaches host
-      try {
-        log('try: fetch (no-cors) ->', url);
-        // note: response will be opaque and unreadable in JS
-        const res = await fetchWithTimeout(url, { method: 'GET', mode: 'no-cors' }, 5000);
-        log('fetch (no-cors) attempt finished (opaque).');
-        return { ok: true, method: 'fetch-no-cors', status: 'opaque' };
-      } catch (err) {
-        log('fetch (no-cors) failed:', err);
-      }
-
-      // 3) image ping fallback
-      try {
-        log('try: Image src ->', url);
-        await new Promise((resolve, reject) => {
-          const img = new Image();
-          let done = false;
-          img.onload = () => { if (!done) { done = true; resolve(); } };
-          img.onerror = () => { if (!done) { done = true; resolve(); } }; // resolve even on error so we don't block
-          // add cache buster
-          img.src = url + (url.includes('?') ? '&' : '?') + 'imgping=' + Date.now();
-          // safety timeout
-          setTimeout(() => { if (!done) { done = true; resolve(); } }, 5000);
-        });
-        log('Image attempt finished (may have reached server).');
-        return { ok: true, method: 'image' };
-      } catch (err) {
-        log('Image attempt failed:', err);
-      }
-
-      return { ok: false };
-    }
-
-    // ping with retry + exponential backoff
-    async function pingRetry(url, retries = RETRY_COUNT) {
-      for (let i = 0; i < retries; i++) {
-        const attempt = i + 1;
-        log(`Ping attempt ${attempt}/${retries} -> ${url}`);
-        const res = await tryPingOnce(url);
+        const res = await fetch(url, { method: 'GET', cache: 'no-store' });
+        write('HTTP', res.status, 'ok=', res.ok);
+        const text = await res.text();
+        write('Response (truncated):', text.slice(0, 500));
         if (res.ok) {
-          log('%cPing succeeded via ' + (res.method || 'unknown'), 'color:green');
-          return true;
-        }
-        const backoff = RETRY_BASE_DELAY * Math.pow(2, i);
-        log(`Attempt ${attempt} failed; waiting ${backoff}ms before retry`);
-        await new Promise(r => setTimeout(r, backoff));
-      }
-      log('%cAll ping attempts failed', 'color:darkred');
-      return false;
-    }
-
-    // perform a ping (unique query to avoid caching)
-    async function doPing() {
-      // make sure hyphen is ASCII and not an en-dash or other invisible char
-      const url = SERVER_BASE.replace(/\u2011|\u2012|\u2013|\u2014/g, '-') + PING_PATH +
-        (PING_PATH.includes('?') ? '&' : '?') + 'ping=' + Date.now();
-      try {
-        await pingRetry(url);
-      } catch (err) {
-        log('Unexpected error during ping:', err);
-      }
-    }
-
-    // Try sendBeacon when page unloads (fire-and-forget, POST). Servers can read body or read querystring.
-    window.addEventListener('unload', () => {
-      try {
-        const beaconUrl = SERVER_BASE + PING_PATH + (PING_PATH.includes('?') ? '&' : '?') + 'beacon=' + Date.now();
-        // sendBeacon will use POST; include a tiny payload
-        if (navigator.sendBeacon) {
-          const ok = navigator.sendBeacon(beaconUrl, new Blob(['beacon'], { type: 'text/plain' }));
-          log('navigator.sendBeacon ->', beaconUrl, 'queued=', ok);
+          write('%cPing success (200)', 'color:green');
         } else {
-          log('navigator.sendBeacon not supported in this browser');
+          write('%cPing failed (non-200)', 'color:orange');
         }
-      } catch (e) {
-        // can't block unload; just ignore
+      } catch (err) {
+        write('Fetch error:', String(err));
       }
-    });
+    }
 
-    // immediate run + schedule
-    (async () => {
-      log('Page loaded. Starting keep-alive pings.');
-      await doPing();
-      setInterval(doPing, INTERVAL_MS);
-    })();
+    // First immediate ping
+    pingOnce();
 
-    // Helpful UX: instructions if CORS errors appear:
-    // If you see "Failed to fetch" in console and no server logs, enable CORS on the server:
-    // Access-Control-Allow-Origin: *
-    // Access-Control-Allow-Methods: GET,POST,OPTIONS
-    // Access-Control-Allow-Headers: ...
-    // (Server-side change required)
+    // Use a conservative interval to avoid overloading the free Render instance.
+    // Render's free tier can be sensitive to very frequent pings; 5 minutes is safe for monitoring.
+    const INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+    setInterval(pingOnce, INTERVAL_MS);
   </script>
 </body>
 </html>
