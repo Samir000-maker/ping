@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html>
+<body>
+<script>
+setInterval(() => {
+  fetch("https://your-render-url.onrender.com/?ping=" + Date.now())
+    .catch(() => {});
+}, 4 * 60 * 1000); 
+</script>
+
+<h2>Server is being kept alive ✅</h2>
+
+</body>
+</html>
