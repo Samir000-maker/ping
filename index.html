@@ -1,53 +1,252 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <title>Ping Debug & Keep Alive</title>
-  <style>
-    #log { font-family: monospace; white-space: pre-wrap; max-height: 320px; overflow:auto; background:#fafafa; padding:8px; border:1px solid #ddd; }
-  </style>
+<meta charset="utf-8" />
+<title>Keep-alive Ping & Logger</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; padding: 18px; background: #fff;}
+  h1 { margin-top: 0; font-size: 20px; }
+  #controls { margin-bottom: 10px; display:flex; gap:8px; flex-wrap:wrap; }
+  button { padding:8px 12px; border-radius:6px; border:1px solid #ccc; background:#f6f6f6; cursor:pointer; }
+  button.important { background:#0b84ff; color:#fff; border-color:#0b6fe0; }
+  #status { margin-left:8px; font-weight:600; }
+  #stats { margin-top:6px; color:#444; font-size:13px; }
+  #logArea { white-space: pre-wrap; font-family: "Courier New", monospace; background:#0b0b0b; color:#e6e6e6; padding:12px; border-radius:6px; height:360px; overflow:auto; border:1px solid #ddd; }
+  .line-ok { color: #8ef08e; }
+  .line-warn { color: #ffd27a; }
+  .line-err { color: #ff9a9a; }
+  .note { color:#666; font-size:13px; margin-bottom:8px; }
+</style>
 </head>
 <body>
-  <h2>Keep-alive pings (debug)</h2>
-  <div id="log"></div>
+  <h1>Keep-alive Ping & Logger</h1>
 
-  <script>
-    const LOG = document.getElementById('log');
-    const HEALTH_URL = 'https://samir-hgr9.onrender.com/health';
+  <div class="note">
+    <strong>Caution:</strong> Pinging every 10s is aggressive for some free host plans. This page uses polite backoff if the server returns 429/503/Retry-After. If you want minimal risk of rate limits, increase interval to 60s or use a dedicated uptime monitor.
+  </div>
 
-    function now() { return new Date().toISOString(); }
-    function write(...args) {
-      const line = '[' + now() + '] ' + args.map(a => (typeof a === 'object' ? JSON.stringify(a) : a)).join(' ');
-      LOG.textContent += line + '\n';
-      LOG.scrollTop = LOG.scrollHeight;
-      console.log(...args);
+  <div id="controls">
+    <button id="btnPause" class="important">Pause</button>
+    <button id="btnResume">Resume</button>
+    <button id="btnClear">Clear log</button>
+    <button id="btnDownload">Download log</button>
+    <div id="status">Status: <span id="statusText">Stopped</span></div>
+  </div>
+
+  <div id="stats">
+    target: <code>https://samir-hgr9.onrender.com/health</code> &nbsp;•&nbsp;
+    interval target: <span id="tgtInterval">10s</span> &nbsp;•&nbsp;
+    attempts: <span id="statAttempts">0</span> &nbsp;•&nbsp;
+    success: <span id="statSuccess">0</span> &nbsp;•&nbsp;
+    fail: <span id="statFail">0</span> &nbsp;•&nbsp;
+    backoff: <span id="statBackoff">none</span>
+  </div>
+
+  <div id="logArea" aria-live="polite"></div>
+
+<script>
+(() => {
+  // CONFIG
+  const BASE_URL = "https://samir-hgr9.onrender.com/health";
+  const TARGET_INTERVAL_MS = 10000;     // desired base interval (10s)
+  const JITTER_MS = 1500;               // +/- jitter to avoid perfect regularity
+  const FETCH_TIMEOUT_MS = 8000;        // abort fetch after 8s
+  const MAX_LOG_LINES = 800;            // keep log bounded
+  const INITIAL_BACKOFF_MS = TARGET_INTERVAL_MS;
+  const MAX_BACKOFF_MS = 5 * 60 * 1000; // 5 minutes
+
+  // STATE
+  let running = true;
+  let attempts = 0, success = 0, fail = 0;
+  let logLines = [];
+  let currentBackoff = 0;  // ms; 0 means no backoff
+  let autoTimerId = null;
+  const logEl = document.getElementById('logArea');
+  const statusText = document.getElementById('statusText');
+  const statAttempts = document.getElementById('statAttempts');
+  const statSuccess = document.getElementById('statSuccess');
+  const statFail = document.getElementById('statFail');
+  const statBackoff = document.getElementById('statBackoff');
+  const tgtInterval = document.getElementById('tgtInterval');
+
+  function nowISO(){ return (new Date()).toISOString(); }
+  function addLog(msg, cssClass) {
+    const ts = nowISO();
+    const line = `[${ts}] ${msg}`;
+    logLines.push({t:ts, text: line, cls: cssClass||''});
+    if (logLines.length > MAX_LOG_LINES) logLines.splice(0, logLines.length - MAX_LOG_LINES);
+    renderLog();
+  }
+  function renderLog() {
+    // render last lines
+    logEl.innerHTML = logLines.map(l => {
+      const cls = l.cls ? ` class="${l.cls}"` : '';
+      // escape HTML in l.text
+      const safe = l.text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      return `<div${cls}>${safe}</div>`;
+    }).join('');
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  function updateStats() {
+    statAttempts.textContent = attempts;
+    statSuccess.textContent = success;
+    statFail.textContent = fail;
+    statBackoff.textContent = currentBackoff ? (currentBackoff/1000 + 's') : 'none';
+  }
+
+  // helper: sleep
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  // fetch with timeout
+  async function fetchWithTimeout(url, options={}, timeoutMs=FETCH_TIMEOUT_MS) {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const resp = await fetch(url, {...options, signal: controller.signal, cache: 'no-store', mode: 'cors', headers: {
+        // Add an identifying header; note browser may restrict some headers but this custom header is usually allowed
+        'X-Keep-Alive-Client': 'ping-page',
+      }});
+      return resp;
+    } finally {
+      clearTimeout(id);
     }
+  }
 
-    async function pingOnce() {
-      const url = HEALTH_URL + '?t=' + Date.now();
-      write('Ping attempt ->', url);
+  // main ping logic with polite backoff handling
+  async function performPing() {
+    attempts++;
+    updateStats();
+
+    // Build URL with timestamp to avoid caches
+    const url = `${BASE_URL}?t=${Date.now()}`;
+
+    addLog(`Ping attempt -> ${url}`);
+    const start = performance.now();
+    try {
+      const resp = await fetchWithTimeout(url);
+      const elapsed = Math.round(performance.now() - start);
+      const status = resp.status;
+      let bodyText = '';
       try {
-        const res = await fetch(url, { method: 'GET', cache: 'no-store' });
-        write('HTTP', res.status, 'ok=', res.ok);
-        const text = await res.text();
-        write('Response (truncated):', text.slice(0, 500));
-        if (res.ok) {
-          write('%cPing success (200)', 'color:green');
-        } else {
-          write('%cPing failed (non-200)', 'color:orange');
-        }
-      } catch (err) {
-        write('Fetch error:', String(err));
+        // try parse as json first
+        bodyText = await resp.text();
+      } catch (e) {
+        bodyText = `<no body read: ${e}>`;
       }
+
+      addLog(`HTTP ${status} ok=${resp.ok} time=${elapsed}ms`);
+      // show truncated body (safe)
+      if (bodyText && bodyText.length > 600) {
+        addLog(`Response (truncated): ${bodyText.slice(0,600)}...`);
+      } else {
+        if (bodyText) addLog(`Response: ${bodyText}`);
+      }
+
+      // success = status in 200..299
+      if (resp.ok) {
+        success++;
+        // reset backoff on success
+        if (currentBackoff) {
+          addLog('Server OK -> resetting backoff to base interval', 'line-warn');
+          currentBackoff = 0;
+        }
+      } else {
+        fail++;
+        // If 429 or 503 or >=500 -> backoff
+        if (status === 429 || status === 503 || status >= 500) {
+          // obey Retry-After header if present (in seconds or date)
+          const ra = resp.headers.get('Retry-After');
+          if (ra) {
+            let raMs = parseInt(ra, 10);
+            if (!isNaN(raMs)) {
+              raMs = raMs * 1000;
+            } else {
+              // try parse date
+              const t = Date.parse(ra);
+              raMs = isNaN(t) ? null : Math.max(0, t - Date.now());
+            }
+            if (raMs) {
+              addLog(`Server requested Retry-After ${ra} -> backing off ${Math.round(raMs/1000)}s`, 'line-warn');
+              currentBackoff = Math.min(MAX_BACKOFF_MS, Math.max(currentBackoff || INITIAL_BACKOFF_MS, raMs));
+            } else {
+              currentBackoff = Math.min(MAX_BACKOFF_MS, (currentBackoff || INITIAL_BACKOFF_MS) * 2);
+              addLog(`Received ${status}. Backoff increased to ${currentBackoff/1000}s`, 'line-warn');
+            }
+          } else {
+            currentBackoff = Math.min(MAX_BACKOFF_MS, (currentBackoff || INITIAL_BACKOFF_MS) * 2);
+            addLog(`Received ${status}. Backoff increased to ${currentBackoff/1000}s`, 'line-warn');
+          }
+        } else {
+          addLog(`Non-OK HTTP status ${status}`, 'line-warn');
+        }
+      }
+    } catch (err) {
+      const elapsed = Math.round(performance.now() - start);
+      fail++;
+      addLog(`Fetch error after ${elapsed}ms -> ${err}`, 'line-err');
+      // network errors: increase backoff modestly
+      currentBackoff = Math.min(MAX_BACKOFF_MS, (currentBackoff || INITIAL_BACKOFF_MS) * 2);
+      addLog(`Network error -> increasing backoff to ${currentBackoff/1000}s`, 'line-warn');
+    } finally {
+      updateStats();
     }
+  }
 
-    // First immediate ping
-    pingOnce();
+  // schedule next ping (with jitter & backoff)
+  function scheduleNext() {
+    if (!running) {
+      statusText.textContent = 'Paused';
+      return;
+    }
+    let base = currentBackoff || TARGET_INTERVAL_MS;
+    // jitter +/- JITTER_MS
+    const jitter = Math.floor((Math.random() * (JITTER_MS*2)) - JITTER_MS);
+    const nextMs = Math.max(1000, base + jitter);
+    statusText.textContent = `Running (next in ${Math.round(nextMs/1000)}s)`;
+    if (autoTimerId) clearTimeout(autoTimerId);
+    autoTimerId = setTimeout(async () => {
+      statusText.textContent = 'Running (pinging...)';
+      await performPing();
+      scheduleNext();
+    }, nextMs);
+  }
 
-    // Use a conservative interval to avoid overloading the free Render instance.
-    // Render's free tier can be sensitive to very frequent pings; 5 minutes is safe for monitoring.
-    const INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
-    setInterval(pingOnce, INTERVAL_MS);
-  </script>
+  // UI controls
+  document.getElementById('btnPause').addEventListener('click', () => {
+    running = false;
+    if (autoTimerId) clearTimeout(autoTimerId);
+    statusText.textContent = 'Paused';
+    addLog('Paused pings by user.', 'line-warn');
+  });
+  document.getElementById('btnResume').addEventListener('click', () => {
+    if (running) return;
+    running = true;
+    addLog('Resumed pings by user.', 'line-warn');
+    scheduleNext();
+  });
+  document.getElementById('btnClear').addEventListener('click', () => {
+    logLines = [];
+    renderLog();
+    addLog('Cleared logs by user.', 'line-warn');
+  });
+  document.getElementById('btnDownload').addEventListener('click', () => {
+    const text = logLines.map(l => l.text).join('\n');
+    const blob = new Blob([text], {type:'text/plain;charset=utf-8'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `ping-log-${new Date().toISOString().replace(/[:.]/g,'-')}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+
+  // init
+  addLog('Page loaded. Starting keep-alive pings.');
+  updateStats();
+  scheduleNext();
+
+})();
+</script>
 </body>
 </html>
