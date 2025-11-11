@@ -444,19 +444,25 @@
     updateServerCard(serverId);
     
     const url = `${server.url}?t=${Date.now()}`;
-    addLog(`[${server.name}] Pinging...`, 'log-info', server.color);
+    addLog(`[${server.name}] 🔍 Pinging ${url}`, 'log-info', server.color);
+    addLog(`[${server.name}] ⏱️ Waiting up to 90 seconds for response...`, 'log-info', server.color);
     
     const start = performance.now();
     try {
+      addLog(`[${server.name}] 📡 Initiating fetch request...`, 'log-info', server.color);
       const resp = await fetchWithTimeout(url);
       const elapsed = Math.round(performance.now() - start);
       const status = resp.status;
       
+      addLog(`[${server.name}] 📥 Response received: HTTP ${status} in ${elapsed}ms`, 'log-info', server.color);
+      
       let bodyText = '';
       try {
         bodyText = await resp.text();
+        addLog(`[${server.name}] 📄 Body length: ${bodyText.length} chars`, 'log-info', server.color);
         if (bodyText.length > 300) bodyText = bodyText.slice(0, 300) + '...';
       } catch (e) {
+        addLog(`[${server.name}] ⚠️ Could not read response body: ${e.message}`, 'log-warn', server.color);
         bodyText = '<no body>';
       }
       
@@ -467,11 +473,11 @@
           success: true,
           message: `✅ HTTP ${status} - ${elapsed}ms - ${bodyText}`
         };
-        addLog(`[${server.name}] ✅ Success: ${status} (${elapsed}ms)`, 'log-ok', server.color);
+        addLog(`[${server.name}] ✅ SUCCESS: ${status} (${elapsed}ms) - ${bodyText}`, 'log-ok', server.color);
         
         // Reset backoff on success
         if (state.backoff) {
-          addLog(`[${server.name}] Backoff reset`, 'log-warn', server.color);
+          addLog(`[${server.name}] 🔄 Backoff reset to normal interval`, 'log-warn', server.color);
           state.backoff = 0;
         }
       } else {
@@ -479,9 +485,16 @@
         totalFail++;
         state.lastPing = {
           success: false,
-          message: `❌ HTTP ${status} - ${elapsed}ms`
+          message: `❌ HTTP ${status} - ${elapsed}ms - ${bodyText}`
         };
-        addLog(`[${server.name}] ⚠️ Failed: ${status} (${elapsed}ms)`, 'log-warn', server.color);
+        addLog(`[${server.name}] ⚠️ FAILED: HTTP ${status} (${elapsed}ms)`, 'log-warn', server.color);
+        addLog(`[${server.name}] 📄 Response body: ${bodyText}`, 'log-warn', server.color);
+        
+        // Log response headers
+        addLog(`[${server.name}] 📋 Response headers:`, 'log-info', server.color);
+        resp.headers.forEach((value, key) => {
+          addLog(`[${server.name}]   ${key}: ${value}`, 'log-info', server.color);
+        });
         
         // Apply backoff for rate limiting or server errors
         if (status === 429 || status === 503 || status >= 500) {
@@ -500,22 +513,38 @@
           } else {
             state.backoff = Math.min(MAX_BACKOFF_MS, (state.backoff || INITIAL_BACKOFF_MS) * 2);
           }
-          addLog(`[${server.name}] 🔄 Backoff: ${Math.round(state.backoff/1000)}s`, 'log-warn', server.color);
+          addLog(`[${server.name}] 🔄 Backoff increased to: ${Math.round(state.backoff/1000)}s`, 'log-warn', server.color);
         }
       }
     } catch (err) {
       const elapsed = Math.round(performance.now() - start);
       state.fail++;
       totalFail++;
+      
+      // Detailed error logging
+      addLog(`[${server.name}] ❌ FETCH ERROR after ${elapsed}ms`, 'log-err', server.color);
+      addLog(`[${server.name}] 🔴 Error type: ${err.name}`, 'log-err', server.color);
+      addLog(`[${server.name}] 🔴 Error message: ${err.message}`, 'log-err', server.color);
+      addLog(`[${server.name}] 🔴 Error stack: ${err.stack ? err.stack.substring(0, 200) : 'N/A'}`, 'log-err', server.color);
+      
+      // Specific error diagnosis
+      if (err.name === 'AbortError') {
+        addLog(`[${server.name}] ⏱️ Request timed out after 90 seconds - server may be sleeping`, 'log-err', server.color);
+      } else if (err.message.includes('Failed to fetch')) {
+        addLog(`[${server.name}] 🌐 Network error - possible CORS issue, server offline, or DNS problem`, 'log-err', server.color);
+        addLog(`[${server.name}] 💡 Check: 1) CORS headers 2) Server running 3) URL correct`, 'log-err', server.color);
+      } else if (err.message.includes('NetworkError')) {
+        addLog(`[${server.name}] 🔌 Network connection failed - check internet or firewall`, 'log-err', server.color);
+      }
+      
       state.lastPing = {
         success: false,
         message: `❌ Error: ${err.message} (${elapsed}ms)`
       };
-      addLog(`[${server.name}] ❌ Error: ${err.message}`, 'log-err', server.color);
       
       // Apply backoff for network errors
       state.backoff = Math.min(MAX_BACKOFF_MS, (state.backoff || INITIAL_BACKOFF_MS) * 2);
-      addLog(`[${server.name}] 🔄 Backoff: ${Math.round(state.backoff/1000)}s`, 'log-warn', server.color);
+      addLog(`[${server.name}] 🔄 Backoff increased to: ${Math.round(state.backoff/1000)}s`, 'log-warn', server.color);
     }
     
     updateServerCard(serverId);
@@ -686,4 +715,3 @@
 </script>
 </body>
 </html>
-
